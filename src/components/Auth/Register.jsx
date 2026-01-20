@@ -152,10 +152,17 @@ function Register() {
 
     const { confirmPassword, ...userData } = formData;
     const result = await register(userData);
-    
+
     if (result.success) {
-      toast.success('Registration successful!');
-      navigate('/dashboard');
+      if (result.requiresEmailConfirmation) {
+        // Email confirmation required
+        toast.success(result.message);
+        setError(`Please check your email (${result.email}) and click the confirmation link to activate your account.`);
+      } else {
+        // Normal registration
+        toast.success('Registration successful!');
+        navigate('/dashboard');
+      }
     } else {
       setError(result.message);
       toast.error(result.message);

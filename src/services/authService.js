@@ -1,79 +1,21 @@
 // Authentication Service with Supabase Integration
 import { supabaseService } from './supabaseService';
 
-// Initialize test users in localStorage if not exists
-const initializeTestUsers = () => {
-  if (!localStorage.getItem('users')) {
-    const testUsers = [
-      {
-        id: 'admin_1',
-        name: 'Admin User',
-        email: 'admin@edulearn.com',
-        password: 'admin123',
-        role: 'admin',
-        createdAt: new Date().toISOString(),
-        subscription: {
-          status: 'active',
-          expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
-        }
-      },
-      {
-        id: 'student_1',
-        name: 'John Doe',
-        email: 'john@student.com',
-        password: 'student123',
-        role: 'student',
-        createdAt: new Date().toISOString(),
-        subscription: {
-          status: 'active',
-          expiry: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString()
-        }
-      },
-      {
-        id: 'student_2',
-        name: 'Jane Smith',
-        email: 'jane@student.com',
-        password: 'student123',
-        role: 'student',
-        createdAt: new Date().toISOString(),
-        subscription: {
-          status: 'inactive',
-          expiry: null
-        }
-      },
-      {
-        id: 'student_3',
-        name: 'Mike Johnson',
-        email: 'mike@student.com',
-        password: 'student123',
-        role: 'student',
-        createdAt: new Date().toISOString(),
-        subscription: {
-          status: 'expired',
-          expiry: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-        }
-      }
-    ];
-    localStorage.setItem('users', JSON.stringify(testUsers));
-  }
-};
-
-initializeTestUsers();
-
 export const authService = {
+  // =======================
+  // LOGIN
+  // =======================
   async login(email, password) {
     try {
       // Sign in with Supabase Auth
       const { data, error } = await supabaseService.signIn(email, password);
-      
-      if (error) {
-        throw error;
-      }
 
-      // Get user profile from users table
+      if (error) throw error;
+
+      // Get user profile from public.users table
       const userProfile = await supabaseService.getUserById(data.user.id);
-      
-      // Get subscription status
+
+      // Get subscription info
       const subscription = await supabaseService.getUserSubscription(data.user.id);
 
       return {
@@ -82,15 +24,12 @@ export const authService = {
           email: data.user.email,
           name: userProfile?.name || data.user.user_metadata?.name || 'User',
           role: userProfile?.role || 'student',
-          subscription: subscription || {
-            status: 'inactive',
-            expiry: null
-          }
+          subscription: subscription || { status: 'inactive', expiry: null }
         },
-        token: data.session.access_token
+        token: data.session?.access_token
       };
     } catch (error) {
-      // Fallback to mock for development if Supabase not configured
+      // Fallback for development/mock environment
       if (error.message?.includes('Invalid API key') || error.message?.includes('fetch')) {
         console.warn('Supabase not configured, using mock auth');
         return this.mockLogin(email, password);
@@ -99,45 +38,65 @@ export const authService = {
     }
   },
 
+  // =======================
+  // REGISTER
+  // =======================
   async register(userData) {
     try {
       // Sign up with Supabase Auth
       const { data, error } = await supabaseService.signUp(
         userData.email,
         userData.password,
-        { name: userData.name }
+        { name: userData.name } // Supabase user_metadata
       );
 
-      if (error) {
-        throw error;
+      if (error) throw error;
+
+      // Check if data exists
+      if (!data) {
+        throw new Error('Registration failed: No response from authentication service');
       }
 
-      // Create user profile in users table
-      const userProfile = {
+      // Handle email confirmation flow
+      if (!data.user) {
+        // Email confirmation is required - user not created yet
+        return {
+          user: null,
+          requiresEmailConfirmation: true,
+          message: 'Registration successful. Please check your email to confirm your account before logging in.',
+          email: userData.email
+        };
+      }
+
+      // User created immediately - insert profile into public.users table
+      const { error: profileError } = await supabaseService.createUser({
         id: data.user.id,
         name: userData.name,
-        email: userData.email,
+        email: data.user.email,
         role: 'student'
-      };
+      });
 
-      await supabaseService.createUser(userProfile);
-
-      // Get subscription (should be inactive for new users)
-      const subscription = {
-        status: 'inactive',
-        expiry: null
-      };
+      if (profileError) {
+        console.error('Failed to create user profile:', profileError);
+        // Don't throw here, user is created in auth, but profile failed
+      }
 
       return {
         user: {
-          ...userProfile,
-          subscription
+          id: data.user.id,
+          email: data.user.email,
+          name: data.user.user_metadata?.name || userData.name,
+          role: 'student',
+          subscription: { status: 'inactive', expiry: null }
         },
-        token: data.session?.access_token || 'mock-token'
+        token: data.session?.access_token,
+        requiresEmailConfirmation: false
       };
     } catch (error) {
-      // Fallback to mock for development
-      if (error.message?.includes('Invalid API key') || error.message?.includes('fetch')) {
+      if (
+        error.message?.includes('Invalid API key') ||
+        error.message?.includes('fetch')
+      ) {
         console.warn('Supabase not configured, using mock registration');
         return this.mockRegister(userData);
       }
@@ -145,18 +104,24 @@ export const authService = {
     }
   },
 
+  // =======================
+  // LOGOUT
+  // =======================
   async logout() {
     try {
       await supabaseService.signOut();
       return true;
     } catch (error) {
-      // Fallback
+      // Fallback for mock
       localStorage.removeItem('user');
       localStorage.removeItem('token');
       return true;
     }
   },
 
+  // =======================
+  // GET CURRENT USER
+  // =======================
   async getCurrentUser() {
     try {
       const user = await supabaseService.getCurrentUser();
@@ -170,73 +135,58 @@ export const authService = {
         email: user.email,
         name: userProfile?.name || user.user_metadata?.name || 'User',
         role: userProfile?.role || 'student',
-        subscription: subscription || {
-          status: 'inactive',
-          expiry: null
-        }
+        subscription: subscription || { status: 'inactive', expiry: null }
       };
     } catch (error) {
-      // Fallback to localStorage
+      // Fallback to localStorage for mock users
       const storedUser = localStorage.getItem('user');
       return storedUser ? JSON.parse(storedUser) : null;
     }
   },
 
-  // Mock methods for development (fallback)
+  // =======================
+  // MOCK METHODS (for dev)
+  // =======================
   async mockLogin(email, password) {
     return new Promise((resolve, reject) => {
       setTimeout(() => {
         const users = JSON.parse(localStorage.getItem('users') || '[]');
         const user = users.find(u => u.email === email && u.password === password);
-        
         if (user) {
           const { password: _, ...userWithoutPassword } = user;
-          resolve({
-            user: userWithoutPassword,
-            token: 'mock-jwt-token-' + Date.now()
-          });
+          resolve({ user: userWithoutPassword, token: 'mock-jwt-token-' + Date.now() });
         } else {
           reject(new Error('Invalid email or password'));
         }
-      }, 1000);
+      }, 500);
     });
   },
 
   async mockRegister(userData) {
     return new Promise((resolve, reject) => {
       setTimeout(() => {
-        try {
-          const users = JSON.parse(localStorage.getItem('users') || '[]');
-          
-          if (users.some(u => u.email === userData.email)) {
-            reject(new Error('User already exists with this email'));
-            return;
-          }
-          
-          const newUser = {
-            id: 'user_' + Date.now(),
-            ...userData,
-            role: 'student',
-            createdAt: new Date().toISOString(),
-            subscription: {
-              status: 'inactive',
-              expiry: null
-            }
-          };
-          
-          users.push(newUser);
-          localStorage.setItem('users', JSON.stringify(users));
-          
-          const { password: _, ...userWithoutPassword } = newUser;
-          
-          resolve({
-            user: userWithoutPassword,
-            token: 'mock-jwt-token-' + Date.now()
-          });
-        } catch (error) {
-          reject(new Error('Registration failed'));
+        const users = JSON.parse(localStorage.getItem('users') || '[]');
+
+        if (users.some(u => u.email === userData.email)) {
+          reject(new Error('User already exists with this email'));
+          return;
         }
-      }, 1000);
+
+        const newUser = {
+          id: 'user_' + Date.now(),
+          ...userData,
+          role: 'student',
+          createdAt: new Date().toISOString(),
+          subscription: { status: 'inactive', expiry: null }
+        };
+
+        users.push(newUser);
+        localStorage.setItem('users', JSON.stringify(users));
+
+        const { password: _, ...userWithoutPassword } = newUser;
+
+        resolve({ user: userWithoutPassword, token: 'mock-jwt-token-' + Date.now() });
+      }, 500);
     });
   }
 };
